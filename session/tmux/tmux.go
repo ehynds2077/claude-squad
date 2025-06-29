@@ -233,7 +233,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 }
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {
-	return t.AttachToWindow("")
+	return t.AttachToWindow("0")
 }
 
 // AttachToWindow attaches to a specific window. If windowName is empty, attaches to the main session.
