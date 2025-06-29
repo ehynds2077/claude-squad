@@ -303,6 +303,11 @@ func (l *List) Attach() (chan struct{}, error) {
 	return targetInstance.Attach()
 }
 
+func (l *List) AttachToTerminal() (chan struct{}, error) {
+	targetInstance := l.items[l.selectedIdx]
+	return targetInstance.AttachToTerminal()
+}
+
 // Up selects the prev item in the list.
 func (l *List) Up() {
 	if len(l.items) == 0 {

@@ -138,6 +138,11 @@ func (w *TabbedWindow) IsInDiffTab() bool {
 	return w.activeTab == DiffTab
 }
 
+// IsInTerminalTab returns true if the terminal tab is currently active
+func (w *TabbedWindow) IsInTerminalTab() bool {
+	return w.activeTab == TerminalTab
+}
+
 func (w *TabbedWindow) String() string {
 	if w.width == 0 || w.height == 0 {
 		return ""

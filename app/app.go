@@ -599,7 +599,16 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 		// Show help screen before attaching
 		m.showHelpScreen(helpTypeInstanceAttach, func() {
-			ch, err := m.list.Attach()
+			var ch chan struct{}
+			var err error
+			
+			// Check if we're on the terminal tab and attach to the appropriate window
+			if m.tabbedWindow.IsInTerminalTab() {
+				ch, err = m.list.AttachToTerminal()
+			} else {
+				ch, err = m.list.Attach()
+			}
+			
 			if err != nil {
 				m.handleError(err)
 				return

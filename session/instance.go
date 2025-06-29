@@ -333,6 +333,21 @@ func (i *Instance) Attach() (chan struct{}, error) {
 	return i.tmuxSession.Attach()
 }
 
+func (i *Instance) AttachToTerminal() (chan struct{}, error) {
+	if !i.started {
+		return nil, fmt.Errorf("cannot attach instance that has not been started")
+	}
+	
+	// Ensure terminal window exists by calling CaptureTerminalContent first
+	// This will create the terminal window if it doesn't exist
+	_, err := i.tmuxSession.CaptureTerminalContent()
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure terminal window exists: %w", err)
+	}
+	
+	return i.tmuxSession.AttachToWindow("terminal")
+}
+
 func (i *Instance) SetPreviewSize(width, height int) error {
 	if !i.started || i.Status == Paused {
 		return fmt.Errorf("cannot set preview size for instance that has not been started or " +

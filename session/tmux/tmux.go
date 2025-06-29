@@ -233,6 +233,29 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 }
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {
+	return t.AttachToWindow("")
+}
+
+// AttachToWindow attaches to a specific window. If windowName is empty, attaches to the main session.
+func (t *TmuxSession) AttachToWindow(windowName string) (chan struct{}, error) {
+	// First, close the existing ptmx if it exists since we need to create a new one
+	if t.ptmx != nil {
+		t.ptmx.Close()
+	}
+	
+	// Create the target string for tmux attach
+	target := t.sanitizedName
+	if windowName != "" {
+		target = fmt.Sprintf("%s:%s", t.sanitizedName, windowName)
+	}
+	
+	// Create new PTY connection to the specific window
+	ptmx, err := t.ptyFactory.Start(exec.Command("tmux", "attach-session", "-t", target))
+	if err != nil {
+		return nil, fmt.Errorf("error opening PTY to window: %w", err)
+	}
+	t.ptmx = ptmx
+	
 	t.attachCh = make(chan struct{})
 
 	t.wg = &sync.WaitGroup{}
