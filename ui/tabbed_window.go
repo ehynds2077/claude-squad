@@ -33,6 +33,7 @@ var (
 const (
 	PreviewTab = iota
 	DiffTab
+	TerminalTab
 )
 
 type Tab struct {
@@ -49,8 +50,9 @@ type TabbedWindow struct {
 	height    int
 	width     int
 
-	preview *PreviewPane
-	diff    *DiffPane
+	preview  *PreviewPane
+	diff     *DiffPane
+	terminal *TerminalPane
 }
 
 func NewTabbedWindow(preview *PreviewPane, diff *DiffPane) *TabbedWindow {
@@ -58,9 +60,11 @@ func NewTabbedWindow(preview *PreviewPane, diff *DiffPane) *TabbedWindow {
 		tabs: []string{
 			"Preview",
 			"Diff",
+			"Terminal",
 		},
-		preview: preview,
-		diff:    diff,
+		preview:  preview,
+		diff:     diff,
+		terminal: NewTerminalPane(),
 	}
 }
 
@@ -83,6 +87,7 @@ func (w *TabbedWindow) SetSize(width, height int) {
 
 	w.preview.SetSize(contentWidth, contentHeight)
 	w.diff.SetSize(contentWidth, contentHeight)
+	w.terminal.SetSize(contentWidth, contentHeight)
 }
 
 func (w *TabbedWindow) GetPreviewSize() (width, height int) {
@@ -108,22 +113,29 @@ func (w *TabbedWindow) UpdateDiff(instance *session.Instance) {
 	w.diff.SetDiff(instance)
 }
 
+func (w *TabbedWindow) UpdateTerminal(instance *session.Instance) error {
+	if w.activeTab != TerminalTab {
+		return nil
+	}
+	return w.terminal.UpdateContent(instance)
+}
+
 // Add these new methods for handling scroll events
 func (w *TabbedWindow) ScrollUp() {
-	if w.activeTab == 1 { // Diff tab
+	if w.activeTab == DiffTab {
 		w.diff.ScrollUp()
 	}
 }
 
 func (w *TabbedWindow) ScrollDown() {
-	if w.activeTab == 1 { // Diff tab
+	if w.activeTab == DiffTab {
 		w.diff.ScrollDown()
 	}
 }
 
 // IsInDiffTab returns true if the diff tab is currently active
 func (w *TabbedWindow) IsInDiffTab() bool {
-	return w.activeTab == 1
+	return w.activeTab == DiffTab
 }
 
 func (w *TabbedWindow) String() string {
@@ -167,10 +179,15 @@ func (w *TabbedWindow) String() string {
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, renderedTabs...)
 	var content string
-	if w.activeTab == 0 {
+	switch w.activeTab {
+	case PreviewTab:
 		content = w.preview.String()
-	} else {
+	case DiffTab:
 		content = w.diff.String()
+	case TerminalTab:
+		content = w.terminal.String()
+	default:
+		content = w.preview.String()
 	}
 	window := windowStyle.Render(
 		lipgloss.Place(

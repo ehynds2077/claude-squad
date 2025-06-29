@@ -627,6 +627,11 @@ func (m *home) instanceChanged() tea.Cmd {
 	if err := m.tabbedWindow.UpdatePreview(selected); err != nil {
 		return m.handleError(err)
 	}
+	
+	// Update terminal content if terminal tab is active
+	if err := m.tabbedWindow.UpdateTerminal(selected); err != nil {
+		return m.handleError(err)
+	}
 	return nil
 }
 

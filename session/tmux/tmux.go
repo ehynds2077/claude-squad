@@ -400,7 +400,9 @@ func (t *TmuxSession) DoesSessionExist() bool {
 // CapturePaneContent captures the content of the tmux pane
 func (t *TmuxSession) CapturePaneContent() (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes)
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", t.sanitizedName)
+	// Explicitly target window 0 (the main Claude window) to avoid confusion with other windows
+	mainTarget := fmt.Sprintf("%s:0", t.sanitizedName)
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", mainTarget)
 	output, err := t.cmdExec.Output(cmd)
 	if err != nil {
 		return "", fmt.Errorf("error capturing pane content: %v", err)
@@ -418,6 +420,65 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 		return "", fmt.Errorf("failed to capture tmux pane content with options: %v", err)
 	}
 	return string(output), nil
+}
+
+// CaptureTerminalContent creates a new terminal window in the tmux session and captures its content
+func (t *TmuxSession) CaptureTerminalContent() (string, error) {
+	// List all windows to see what we have
+	listCmd := exec.Command("tmux", "list-windows", "-t", t.sanitizedName, "-F", "#{window_index}:#{window_name}")
+	listOutput, err := t.cmdExec.Output(listCmd)
+	if err != nil {
+		return "", fmt.Errorf("error listing windows: %v", err)
+	}
+	
+	windows := strings.TrimSpace(string(listOutput))
+	hasTerminalWindow := strings.Contains(windows, ":terminal")
+	
+	// Create terminal window if it doesn't exist
+	if !hasTerminalWindow {
+		// Get the working directory from the main window (window 0)
+		getWorkDirCmd := exec.Command("tmux", "display-message", "-t", fmt.Sprintf("%s:0", t.sanitizedName), "-p", "#{pane_current_path}")
+		workDirOutput, err := t.cmdExec.Output(getWorkDirCmd)
+		if err != nil {
+			return "", fmt.Errorf("error getting working directory: %v", err)
+		}
+		workDir := strings.TrimSpace(string(workDirOutput))
+		
+		// Create new window with a plain shell (not claude)
+		createCmd := exec.Command("tmux", "new-window", "-t", t.sanitizedName, "-n", "terminal", "-c", workDir, "zsh")
+		if err := t.cmdExec.Run(createCmd); err != nil {
+			return "", fmt.Errorf("error creating terminal window: %v", err)
+		}
+		
+		// Send a clear command and a prompt to make it obvious this is the terminal
+		clearCmd := exec.Command("tmux", "send-keys", "-t", fmt.Sprintf("%s:terminal", t.sanitizedName), "clear", "Enter")
+		if err := t.cmdExec.Run(clearCmd); err != nil {
+			// Don't fail if this doesn't work, it's just cosmetic
+		}
+		
+		// Send a comment to distinguish this terminal
+		commentCmd := exec.Command("tmux", "send-keys", "-t", fmt.Sprintf("%s:terminal", t.sanitizedName), "# Claude Squad Terminal Window", "Enter")
+		if err := t.cmdExec.Run(commentCmd); err != nil {
+			// Don't fail if this doesn't work, it's just cosmetic
+		}
+		
+		// IMPORTANT: Switch back to the main window (window 0) so Preview tab captures the right pane
+		switchCmd := exec.Command("tmux", "select-window", "-t", fmt.Sprintf("%s:0", t.sanitizedName))
+		if err := t.cmdExec.Run(switchCmd); err != nil {
+			// Log but don't fail - this is important for correct behavior
+			return "", fmt.Errorf("error switching back to main window: %v", err)
+		}
+	}
+	
+	// Capture content from the specific terminal window
+	terminalTarget := fmt.Sprintf("%s:terminal", t.sanitizedName)
+	captureCmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", terminalTarget)
+	captureOutput, err := t.cmdExec.Output(captureCmd)
+	if err != nil {
+		return "", fmt.Errorf("error capturing terminal pane content: %v", err)
+	}
+	
+	return string(captureOutput), nil
 }
 
 // CleanupSessions kills all tmux sessions that start with "session-"

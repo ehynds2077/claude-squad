@@ -302,6 +302,13 @@ func (i *Instance) Preview() (string, error) {
 	return i.tmuxSession.CapturePaneContent()
 }
 
+func (i *Instance) TerminalPreview() (string, error) {
+	if !i.started || i.Status == Paused {
+		return "", nil
+	}
+	return i.tmuxSession.CaptureTerminalContent()
+}
+
 func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {
 	if !i.started {
 		return false, false
