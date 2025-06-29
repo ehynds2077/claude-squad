@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(rg:*)",
+      "Bash(go build:*)",
+      "Bash(ls:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(./claude-squad --help)",
+      "Bash(go mod:*)",
+      "Bash(grep:*)",
+      "Bash(go test:*)",
+      "Bash(go run:*)"
+    ],
+    "deny": []
+  }
+}

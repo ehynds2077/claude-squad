@@ -11,8 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const readyIcon = "● "
-const pausedIcon = "⏸ "
+const readyIcon = "* "
+const pausedIcon = "|| "
 
 var readyStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#51bd73", Dark: "#51bd73"})
@@ -62,6 +62,9 @@ type List struct {
 	// map of repo name to number of instances using it. Used to display the repo name only if there are
 	// multiple repos in play.
 	repos map[string]int
+	
+	// Repository tabs component for managing multiple repositories
+	repoTabs *RepoTabs
 }
 
 func NewList(spinner *spinner.Model, autoYes bool) *List {
@@ -70,6 +73,7 @@ func NewList(spinner *spinner.Model, autoYes bool) *List {
 		renderer: &InstanceRenderer{spinner: spinner},
 		repos:    make(map[string]int),
 		autoyes:  autoYes,
+		repoTabs: NewRepoTabs(),
 	}
 }
 
@@ -78,6 +82,7 @@ func (l *List) SetSize(width, height int) {
 	l.width = width
 	l.height = height
 	l.renderer.setWidth(width)
+	l.repoTabs.SetWidth(width)
 }
 
 // SetSessionPreviewSize sets the height and width for the tmux sessions. This makes the stdout line have the correct
@@ -110,8 +115,7 @@ func (r *InstanceRenderer) setWidth(width int) {
 	r.width = AdjustPreviewWidth(width)
 }
 
-// ɹ and ɻ are other options.
-const branchIcon = "Ꮧ"
+const branchIcon = ">"
 
 func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, hasMultipleRepos bool) string {
 	prefix := fmt.Sprintf(" %d. ", idx)
@@ -231,6 +235,15 @@ func (l *List) String() string {
 	b.WriteString("\n")
 	b.WriteString("\n")
 
+	// Render repository tabs if there are multiple repos
+	if l.repoTabs.ShouldShowTabs() {
+		tabsContent := l.repoTabs.Render()
+		if tabsContent != "" {
+			b.WriteString(tabsContent)
+			b.WriteString("\n")
+		}
+	}
+
 	// Write title line
 	// add padding of 2 because the border on list items adds some extra characters
 	titleWidth := AdjustPreviewWidth(l.width) + 2
@@ -249,23 +262,83 @@ func (l *List) String() string {
 	b.WriteString("\n")
 	b.WriteString("\n")
 
-	// Render the list.
-	for i, item := range l.items {
-		b.WriteString(l.renderer.Render(item, i+1, i == l.selectedIdx, len(l.repos) > 1))
-		if i != len(l.items)-1 {
+	// Get filtered instances based on selected repository
+	filteredItems := l.GetFilteredInstances()
+	
+	// Render the filtered list
+	for i, item := range filteredItems {
+		// Find the original index for selection highlighting
+		originalIdx := -1
+		for j, originalItem := range l.items {
+			if originalItem == item {
+				originalIdx = j
+				break
+			}
+		}
+		
+		isSelected := originalIdx == l.selectedIdx
+		b.WriteString(l.renderer.Render(item, i+1, isSelected, len(l.repos) > 1))
+		if i != len(filteredItems)-1 {
 			b.WriteString("\n\n")
 		}
 	}
+	
+	// Add empty lines at the end if we have space
+	if len(filteredItems) == 0 && l.repoTabs.ShouldShowTabs() {
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "#999999", Dark: "#666666"}).
+			Render("  No instances in this repository"))
+	}
+	
 	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top, b.String())
 }
 
 // Down selects the next item in the list.
 func (l *List) Down() {
-	if len(l.items) == 0 {
+	filteredItems := l.GetFilteredInstances()
+	if len(filteredItems) == 0 {
 		return
 	}
-	if l.selectedIdx < len(l.items)-1 {
-		l.selectedIdx++
+	
+	// Ensure selection is valid first
+	if l.selectedIdx >= len(l.items) {
+		l.selectedIdx = 0
+	}
+	
+	// Find current position in filtered list
+	currentFilteredIdx := -1
+	for i, item := range filteredItems {
+		if l.items[l.selectedIdx] == item {
+			currentFilteredIdx = i
+			break
+		}
+	}
+	
+	// If current item is not in filtered list, select first filtered item
+	if currentFilteredIdx == -1 {
+		if len(filteredItems) > 0 {
+			firstItem := filteredItems[0]
+			for i, item := range l.items {
+				if item == firstItem {
+					l.selectedIdx = i
+					break
+				}
+			}
+		}
+		return
+	}
+	
+	// Move to next item in filtered list
+	if currentFilteredIdx < len(filteredItems)-1 {
+		nextItem := filteredItems[currentFilteredIdx+1]
+		// Find original index of next item
+		for i, item := range l.items {
+			if item == nextItem {
+				l.selectedIdx = i
+				break
+			}
+		}
 	}
 }
 
@@ -286,12 +359,12 @@ func (l *List) Kill() {
 		defer l.Up()
 	}
 
-	// Unregister the reponame.
-	repoName, err := targetInstance.RepoName()
+	// Unregister the repository path.
+	gitWorktree, err := targetInstance.GetGitWorktree()
 	if err != nil {
-		log.ErrorLog.Printf("could not get repo name: %v", err)
-	} else {
-		l.rmRepo(repoName)
+		log.ErrorLog.Printf("could not get git worktree: %v", err)
+	} else if gitWorktree != nil {
+		l.rmRepo(gitWorktree.GetRepoPath())
 	}
 
 	// Since there's items after this, the selectedIdx can stay the same.
@@ -310,11 +383,49 @@ func (l *List) AttachToTerminal() (chan struct{}, error) {
 
 // Up selects the prev item in the list.
 func (l *List) Up() {
-	if len(l.items) == 0 {
+	filteredItems := l.GetFilteredInstances()
+	if len(filteredItems) == 0 {
 		return
 	}
-	if l.selectedIdx > 0 {
-		l.selectedIdx--
+	
+	// Ensure selection is valid first
+	if l.selectedIdx >= len(l.items) {
+		l.selectedIdx = 0
+	}
+	
+	// Find current position in filtered list
+	currentFilteredIdx := -1
+	for i, item := range filteredItems {
+		if l.items[l.selectedIdx] == item {
+			currentFilteredIdx = i
+			break
+		}
+	}
+	
+	// If current item is not in filtered list, select first filtered item
+	if currentFilteredIdx == -1 {
+		if len(filteredItems) > 0 {
+			firstItem := filteredItems[0]
+			for i, item := range l.items {
+				if item == firstItem {
+					l.selectedIdx = i
+					break
+				}
+			}
+		}
+		return
+	}
+	
+	// Move to previous item in filtered list
+	if currentFilteredIdx > 0 {
+		prevItem := filteredItems[currentFilteredIdx-1]
+		// Find original index of previous item
+		for i, item := range l.items {
+			if item == prevItem {
+				l.selectedIdx = i
+				break
+			}
+		}
 	}
 }
 
@@ -323,6 +434,12 @@ func (l *List) addRepo(repo string) {
 		l.repos[repo] = 0
 	}
 	l.repos[repo]++
+	
+	// Update repository tabs
+	l.repoTabs.AddRepo(repo)
+	
+	// Ensure valid selection after adding repo
+	l.EnsureValidSelection()
 }
 
 func (l *List) rmRepo(repo string) {
@@ -333,6 +450,11 @@ func (l *List) rmRepo(repo string) {
 	l.repos[repo]--
 	if l.repos[repo] == 0 {
 		delete(l.repos, repo)
+		// Remove from repository tabs
+		l.repoTabs.RemoveRepo(repo)
+		
+		// Ensure valid selection after removing repo
+		l.EnsureValidSelection()
 	}
 }
 
@@ -341,15 +463,19 @@ func (l *List) rmRepo(repo string) {
 // When creating a new one and entering the name, you want to call the finalizer once the name is done.
 func (l *List) AddInstance(instance *session.Instance) (finalize func()) {
 	l.items = append(l.items, instance)
-	// The finalizer registers the repo name once the instance is started.
+	// The finalizer registers the repo path once the instance is started.
 	return func() {
-		repoName, err := instance.RepoName()
+		gitWorktree, err := instance.GetGitWorktree()
 		if err != nil {
-			log.ErrorLog.Printf("could not get repo name: %v", err)
+			log.ErrorLog.Printf("could not get git worktree: %v", err)
+			return
+		}
+		if gitWorktree == nil {
+			log.ErrorLog.Printf("git worktree is nil")
 			return
 		}
 
-		l.addRepo(repoName)
+		l.addRepo(gitWorktree.GetRepoPath())
 	}
 }
 
@@ -372,4 +498,108 @@ func (l *List) SetSelectedInstance(idx int) {
 // GetInstances returns all instances in the list
 func (l *List) GetInstances() []*session.Instance {
 	return l.items
+}
+
+// GetRepoTabs returns the repository tabs component
+func (l *List) GetRepoTabs() *RepoTabs {
+	return l.repoTabs
+}
+
+// GetFilteredInstances returns instances filtered by the currently selected repository
+func (l *List) GetFilteredInstances() []*session.Instance {
+	if !l.repoTabs.ShouldShowTabs() {
+		return l.items
+	}
+	
+	selectedRepo := l.repoTabs.GetSelectedRepo()
+	if selectedRepo == "" {
+		return l.items
+	}
+	
+	var filtered []*session.Instance
+	for _, instance := range l.items {
+		if instance.Started() {
+			// Get the git worktree to access the full repository path
+			gitWorktree, err := instance.GetGitWorktree()
+			if err != nil {
+				log.ErrorLog.Printf("could not get git worktree for filtering: %v", err)
+				continue
+			}
+			if gitWorktree != nil && gitWorktree.GetRepoPath() == selectedRepo {
+				filtered = append(filtered, instance)
+			}
+		} else {
+			// Include non-started instances as they don't have a repository yet
+			filtered = append(filtered, instance)
+		}
+	}
+	
+	return filtered
+}
+
+// EnsureValidSelection ensures the current selection is visible in the filtered view
+func (l *List) EnsureValidSelection() {
+	filteredItems := l.GetFilteredInstances()
+	if len(filteredItems) == 0 {
+		return
+	}
+	
+	// Bounds check
+	if l.selectedIdx >= len(l.items) {
+		l.selectedIdx = 0
+	}
+	
+	// Check if current selection is in filtered items
+	currentItem := l.items[l.selectedIdx]
+	for _, item := range filteredItems {
+		if item == currentItem {
+			return // Current selection is valid
+		}
+	}
+	
+	// Current selection is not visible, select first filtered item
+	firstItem := filteredItems[0]
+	for i, item := range l.items {
+		if item == firstItem {
+			l.selectedIdx = i
+			break
+		}
+	}
+}
+
+// NextRepo switches to the next repository tab
+func (l *List) NextRepo() {
+	if l.repoTabs.ShouldShowTabs() {
+		l.repoTabs.NextRepo()
+		l.EnsureValidSelection()
+	}
+}
+
+// PrevRepo switches to the previous repository tab
+func (l *List) PrevRepo() {
+	if l.repoTabs.ShouldShowTabs() {
+		l.repoTabs.PrevRepo()
+		l.EnsureValidSelection()
+	}
+}
+
+// GetCurrentRepoName returns the display name of the currently selected repository
+func (l *List) GetCurrentRepoName() string {
+	if l.repoTabs.ShouldShowTabs() {
+		return l.repoTabs.GetSelectedRepoName()
+	}
+	return ""
+}
+
+// GetCurrentRepoPath returns the full path of the currently selected repository
+func (l *List) GetCurrentRepoPath() string {
+	if l.repoTabs.ShouldShowTabs() {
+		return l.repoTabs.GetSelectedRepo()
+	}
+	return ""
+}
+
+// HasMultipleRepos returns true if there are multiple repositories being managed
+func (l *List) HasMultipleRepos() bool {
+	return l.repoTabs.ShouldShowTabs()
 }

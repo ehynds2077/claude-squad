@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -20,9 +21,9 @@ import (
 const GlobalInstanceLimit = 10
 
 // Run is the main entrypoint into the application.
-func Run(ctx context.Context, program string, autoYes bool) error {
+func Run(ctx context.Context, program string, autoYes bool, targetDir string) error {
 	p := tea.NewProgram(
-		newHome(ctx, program, autoYes),
+		newHome(ctx, program, autoYes, targetDir),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(), // Mouse scroll
 	)
@@ -42,6 +43,8 @@ const (
 	stateHelp
 	// stateConfirm is the state when a confirmation modal is displayed.
 	stateConfirm
+	// stateDirectoryPicker is the state when the directory picker is displayed.
+	stateDirectoryPicker
 )
 
 type home struct {
@@ -51,6 +54,7 @@ type home struct {
 
 	program string
 	autoYes bool
+	targetDir string
 
 	// storage is the interface for saving/loading data to/from the app's state
 	storage *session.Storage
@@ -91,9 +95,13 @@ type home struct {
 	textOverlay *overlay.TextOverlay
 	// confirmationOverlay displays confirmation modals
 	confirmationOverlay *overlay.ConfirmationOverlay
+	// directoryPicker handles directory selection
+	directoryPicker *ui.DirectoryPicker
+	// repoTabs manages repository tab navigation
+	repoTabs *ui.RepoTabs
 }
 
-func newHome(ctx context.Context, program string, autoYes bool) *home {
+func newHome(ctx context.Context, program string, autoYes bool, targetDir string) *home {
 	// Load application config
 	appConfig := config.LoadConfig()
 
@@ -108,25 +116,69 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 	}
 
 	h := &home{
-		ctx:          ctx,
-		spinner:      spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		menu:         ui.NewMenu(),
-		tabbedWindow: ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane()),
-		errBox:       ui.NewErrBox(),
-		storage:      storage,
-		appConfig:    appConfig,
-		program:      program,
-		autoYes:      autoYes,
-		state:        stateDefault,
-		appState:     appState,
+		ctx:             ctx,
+		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		menu:            ui.NewMenu(),
+		tabbedWindow:    ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane()),
+		errBox:          ui.NewErrBox(),
+		storage:         storage,
+		appConfig:       appConfig,
+		program:         program,
+		autoYes:         autoYes,
+		targetDir:       targetDir,
+		state:           stateDefault,
+		appState:        appState,
+		directoryPicker: ui.NewDirectoryPicker(),
+		repoTabs:        ui.NewRepoTabs(),
 	}
 	h.list = ui.NewList(&h.spinner, autoYes)
 
+	// Initialize repository state management
+	if err := h.initializeRepositoryState(); err != nil {
+		fmt.Printf("Failed to initialize repository state: %v\n", err)
+		os.Exit(1)
+	}
+	
 	// Load saved instances
 	instances, err := storage.LoadInstances()
 	if err != nil {
 		fmt.Printf("Failed to load instances: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Initialize repository tabs with repositories from state
+	repos := appState.GetRepositories()
+	var repoPaths []string
+	for _, repo := range repos {
+		repoPaths = append(repoPaths, repo.Path)
+	}
+	
+	// Add targetDir to repository tabs if provided and valid
+	if targetDir != "" {
+		// Validate and potentially add targetDir as a repository
+		if err := h.ensureRepositoryTracked(targetDir); err != nil {
+			log.WarningLog.Printf("Target directory is not a valid repository: %v", err)
+		} else {
+			// Add to repos list if not already present
+			found := false
+			for _, path := range repoPaths {
+				if path == targetDir {
+					found = true
+					break
+				}
+			}
+			if !found {
+				repoPaths = append(repoPaths, targetDir)
+			}
+		}
+	}
+
+	if len(repoPaths) > 0 {
+		h.repoTabs.SetRepos(repoPaths)
+		// Select targetDir if provided, otherwise keep default selection
+		if targetDir != "" {
+			h.repoTabs.SelectRepo(targetDir)
+		}
 	}
 
 	// Add loaded instances to the list
@@ -136,6 +188,12 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 		if autoYes {
 			instance.AutoYes = true
 		}
+	}
+
+	// If no instances exist and no targetDir was provided, show directory picker on startup
+	if len(instances) == 0 && targetDir == "" {
+		h.state = stateDirectoryPicker
+		h.directoryPicker.Reset()
 	}
 
 	return h
@@ -150,6 +208,12 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 
 	// Menu takes 10% of height, list and window take 90%
 	contentHeight := int(float32(msg.Height) * 0.9)
+	
+	// Account for repo tabs height
+	if m.repoTabs != nil && m.repoTabs.ShouldShowTabs() {
+		contentHeight -= m.repoTabs.GetHeight()
+	}
+	
 	menuHeight := msg.Height - contentHeight - 1     // minus 1 for error box
 	m.errBox.SetSize(int(float32(msg.Width)*0.9), 1) // error box takes 1 row
 
@@ -162,6 +226,12 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	if m.textOverlay != nil {
 		m.textOverlay.SetWidth(int(float32(msg.Width) * 0.6))
 	}
+	if m.directoryPicker != nil {
+		m.directoryPicker.SetSize(int(float32(msg.Width)*0.8), int(float32(msg.Height)*0.8))
+	}
+	if m.repoTabs != nil {
+		m.repoTabs.SetWidth(msg.Width)
+	}
 
 	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
 	if err := m.list.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
@@ -173,18 +243,93 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 func (m *home) Init() tea.Cmd {
 	// Upon starting, we want to start the spinner. Whenever we get a spinner.TickMsg, we
 	// update the spinner, which sends a new spinner.TickMsg. I think this lasts forever lol.
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		m.spinner.Tick,
 		func() tea.Msg {
 			time.Sleep(100 * time.Millisecond)
 			return previewTickMsg{}
 		},
 		tickUpdateMetadataCmd,
-	)
+	}
+
+	// If we're starting in directory picker state, initialize it
+	if m.state == stateDirectoryPicker {
+		cmds = append(cmds, m.directoryPicker.Init())
+	}
+
+	return tea.Batch(cmds...)
 }
 
 func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case ui.DirectorySelectedMsg:
+		// Handle directory selection from bubble tea directory picker
+		selectedPath := msg.Path
+		
+		// Add the selected directory to repo tabs
+		m.repoTabs.AddRepo(selectedPath)
+		m.repoTabs.SelectRepo(selectedPath)
+		
+		// Update targetDir to the selected path for future instances
+		m.targetDir = selectedPath
+		
+		// Create new instance in the selected directory
+		instance, err := session.NewInstance(session.InstanceOptions{
+			Title:   "",
+			Path:    selectedPath,
+			Program: m.program,
+		})
+		if err != nil {
+			m.state = stateDefault
+			return m, m.handleError(err)
+		}
+		
+		m.newInstanceFinalizer = m.list.AddInstance(instance)
+		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+		m.state = stateNew
+		m.menu.SetState(ui.StateNewInstance)
+		
+		return m, tea.WindowSize()
+	case ui.DirectoryPickerCancelledMsg:
+		// Handle bubble tea directory picker cancellation
+		m.state = stateDefault
+		return m, tea.WindowSize()
+	case ui.NvimDirectorySelectedMsg:
+		// Handle directory selection from nvim directory picker
+		selectedPath := msg.Path
+		
+		// Add the selected directory to repo tabs
+		m.repoTabs.AddRepo(selectedPath)
+		m.repoTabs.SelectRepo(selectedPath)
+		
+		// Update targetDir to the selected path for future instances
+		m.targetDir = selectedPath
+		
+		// Create new instance in the selected directory
+		instance, err := session.NewInstance(session.InstanceOptions{
+			Title:   "",
+			Path:    selectedPath,
+			Program: m.program,
+		})
+		if err != nil {
+			m.state = stateDefault
+			return m, m.handleError(err)
+		}
+		
+		m.newInstanceFinalizer = m.list.AddInstance(instance)
+		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+		m.state = stateNew
+		m.menu.SetState(ui.StateNewInstance)
+		
+		return m, tea.WindowSize()
+	case ui.NvimDirectoryPickerCancelledMsg:
+		// Handle nvim directory picker cancellation
+		m.state = stateDefault
+		return m, tea.WindowSize()
+	case ui.NvimDirectoryPickerErrorMsg:
+		// Handle nvim directory picker error
+		m.state = stateDefault
+		return m, m.handleError(msg.Error)
 	case hideErrMsg:
 		m.errBox.Clear()
 	case previewTickMsg:
@@ -235,6 +380,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
+		// Handle directory picker input when in directory picker state
+		if m.state == stateDirectoryPicker {
+			var cmd tea.Cmd
+			var updatedModel tea.Model
+			updatedModel, cmd = m.directoryPicker.Update(msg)
+			m.directoryPicker = updatedModel.(*ui.DirectoryPicker)
+			return m, cmd
+		}
 		return m.handleKeyPress(msg)
 	case tea.WindowSizeMsg:
 		m.updateHandleWindowSizeEvent(msg)
@@ -332,6 +485,13 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				m.state = stateDefault
 				return m, m.handleError(err)
 			}
+			
+			// Track repository if instance has one
+			if err := m.trackRepository(instance); err != nil {
+				// Log error but don't fail instance creation
+				log.WarningLog.Printf("failed to track repository: %v", err)
+			}
+			
 			// Save after adding new instance
 			if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
 				return m, m.handleError(err)
@@ -451,20 +611,30 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "",
-			Path:    ".",
-			Program: m.program,
-		})
-		if err != nil {
-			return m, m.handleError(err)
-		}
+		
+		// If targetDir is available, use it; otherwise show directory picker
+		if m.targetDir != "" {
+			instance, err := session.NewInstance(session.InstanceOptions{
+				Title:   "",
+				Path:    m.targetDir,
+				Program: m.program,
+			})
+			if err != nil {
+				return m, m.handleError(err)
+			}
 
-		m.newInstanceFinalizer = m.list.AddInstance(instance)
-		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
-		m.state = stateNew
-		m.menu.SetState(ui.StateNewInstance)
-		m.promptAfterName = true
+			m.newInstanceFinalizer = m.list.AddInstance(instance)
+			m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+			m.promptAfterName = true
+		} else {
+			// No targetDir, show directory picker
+			m.state = stateDirectoryPicker
+			m.directoryPicker.Reset()
+			m.promptAfterName = true
+			return m, tea.Batch(tea.WindowSize(), m.directoryPicker.Init())
+		}
 
 		return m, nil
 	case keys.KeyNew:
@@ -472,19 +642,29 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "",
-			Path:    ".",
-			Program: m.program,
-		})
-		if err != nil {
-			return m, m.handleError(err)
-		}
+		
+		// If targetDir is available, use it; otherwise show directory picker
+		if m.targetDir != "" {
+			instance, err := session.NewInstance(session.InstanceOptions{
+				Title:   "",
+				Path:    m.targetDir,
+				Program: m.program,
+			})
+			if err != nil {
+				return m, m.handleError(err)
+			}
 
-		m.newInstanceFinalizer = m.list.AddInstance(instance)
-		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
-		m.state = stateNew
-		m.menu.SetState(ui.StateNewInstance)
+			m.newInstanceFinalizer = m.list.AddInstance(instance)
+			m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+		} else {
+			// No targetDir, show directory picker
+			m.state = stateDirectoryPicker
+			m.directoryPicker.Reset()
+			m.promptAfterName = false
+			return m, tea.Batch(tea.WindowSize(), m.directoryPicker.Init())
+		}
 
 		return m, nil
 	case keys.KeyUp:
@@ -617,6 +797,35 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			m.state = stateDefault
 		})
 		return m, nil
+	case keys.KeyDirectoryPicker:
+		// Show directory picker - prefer nvim if available, fallback to bubble tea picker
+		log.ErrorLog.Printf("DEBUG: KeyDirectoryPicker pressed, nvim available: %v", ui.IsNvimAvailable())
+		if ui.IsNvimAvailable() {
+			log.ErrorLog.Printf("DEBUG: Launching nvim directory picker")
+			nvimPicker := ui.NewNvimDirectoryPicker()
+			return m, nvimPicker.LaunchDirectoryPicker()
+		} else {
+			log.ErrorLog.Printf("DEBUG: Nvim not available, showing instructions")
+			// Show setup instructions for nvim + Oil.nvim
+			setupMsg := ui.GetNvimSetupInstructions()
+			return m, m.handleError(fmt.Errorf("neovim with Oil.nvim required for directory picker:\n\n%s", setupMsg))
+		}
+	case keys.KeyRepoTabNext:
+		// Navigate to next repository tab
+		if m.repoTabs.HasRepos() {
+			m.repoTabs.NextRepo()
+			// Filter instances based on selected repository
+			return m, m.instanceChanged()
+		}
+		return m, nil
+	case keys.KeyRepoTabPrev:
+		// Navigate to previous repository tab
+		if m.repoTabs.HasRepos() {
+			m.repoTabs.PrevRepo()
+			// Filter instances based on selected repository
+			return m, m.instanceChanged()
+		}
+		return m, nil
 	default:
 		return m, nil
 	}
@@ -691,6 +900,126 @@ func (m *home) handleError(err error) tea.Cmd {
 	}
 }
 
+// trackRepository ensures the repository is tracked in state when an instance is created
+func (m *home) trackRepository(instance *session.Instance) error {
+	// Get repository path from instance
+	repoPath := instance.RepositoryPath
+	if repoPath == "" {
+		// Try to get from git worktree if repository path is not set
+		if instance.Started() {
+			worktree, err := instance.GetGitWorktree()
+			if err == nil {
+				repoPath = worktree.GetRepoPath()
+			}
+		}
+	}
+	
+	if repoPath == "" {
+		// No repository to track
+		return nil
+	}
+	
+	// Cast to concrete state to access repository methods
+	state, ok := m.appState.(*config.State)
+	if !ok {
+		return fmt.Errorf("state is not a concrete State type")
+	}
+	
+	// Check if repository already exists in state
+	_, err := state.GetRepository(repoPath)
+	if err == nil {
+		// Repository already exists, just update last accessed time
+		return state.UpdateRepositoryLastAccessed(repoPath)
+	}
+	
+	// Create new repository entry
+	repoData, err := config.CreateRepositoryData(repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to create repository data: %w", err)
+	}
+	
+	// Add repository to state
+	if err := state.AddRepository(repoData); err != nil {
+		return fmt.Errorf("failed to add repository to state: %w", err)
+	}
+	
+	// Update instance counts
+	if err := m.storage.UpdateInstanceCounts(); err != nil {
+		return fmt.Errorf("failed to update instance counts: %w", err)
+	}
+	
+	return nil
+}
+
+// initializeRepositoryState performs cleanup and initialization of repository state
+func (m *home) initializeRepositoryState() error {
+	// Clean up invalid repositories
+	var removedCount int
+	var err error
+	if state, ok := m.appState.(*config.State); ok {
+		removedCount, err = state.CleanupInvalidRepositories()
+		if err != nil {
+			return fmt.Errorf("failed to cleanup invalid repositories: %w", err)
+		}
+		if removedCount > 0 && log.InfoLog != nil {
+			log.InfoLog.Printf("Cleaned up %d invalid repositories", removedCount)
+		}
+	}
+	
+	// Clean up orphaned instances
+	if err := m.storage.CleanupOrphanedInstances(); err != nil {
+		return fmt.Errorf("failed to cleanup orphaned instances: %w", err)
+	}
+	
+	// Migrate instances to ensure they have repository paths set
+	if err := m.storage.MigrateInstanceRepositoryPaths(); err != nil {
+		return fmt.Errorf("failed to migrate instance repository paths: %w", err)
+	}
+	
+	// Update instance counts for all repositories
+	if err := m.storage.UpdateInstanceCounts(); err != nil {
+		return fmt.Errorf("failed to update instance counts: %w", err)
+	}
+	
+	return nil
+}
+
+// ensureRepositoryTracked ensures a repository path is tracked in state
+func (m *home) ensureRepositoryTracked(path string) error {
+	// Convert to absolute path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+	
+	// Find repository root
+	repoPath, err := config.FindRepositoryForPath(absPath)
+	if err != nil {
+		return fmt.Errorf("not a git repository: %w", err)
+	}
+	
+	// Cast to concrete state to access repository methods
+	state, ok := m.appState.(*config.State)
+	if !ok {
+		return fmt.Errorf("state is not a concrete State type")
+	}
+	
+	// Check if already tracked
+	_, err = state.GetRepository(repoPath)
+	if err == nil {
+		// Already tracked, update last accessed
+		return state.UpdateRepositoryLastAccessed(repoPath)
+	}
+	
+	// Create and add repository
+	repoData, err := config.CreateRepositoryData(repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to create repository data: %w", err)
+	}
+	
+	return state.AddRepository(repoData)
+}
+
 // confirmAction shows a confirmation modal and stores the action to execute on confirm
 func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
@@ -721,11 +1050,23 @@ func (m *home) View() string {
 	previewWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.tabbedWindow.String())
 	listAndPreview := lipgloss.JoinHorizontal(lipgloss.Top, listWithPadding, previewWithPadding)
 
+	// Build main content components
+	components := []string{}
+	
+	// Add repo tabs if we have multiple repos
+	if m.repoTabs != nil && m.repoTabs.ShouldShowTabs() {
+		components = append(components, m.repoTabs.Render())
+	}
+	
+	// Add list and preview
+	components = append(components, listAndPreview)
+	
+	// Add menu and error box
+	components = append(components, m.menu.String(), m.errBox.String())
+
 	mainView := lipgloss.JoinVertical(
 		lipgloss.Center,
-		listAndPreview,
-		m.menu.String(),
-		m.errBox.String(),
+		components...,
 	)
 
 	if m.state == statePrompt {
@@ -743,6 +1084,11 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("confirmation overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true, true)
+	} else if m.state == stateDirectoryPicker {
+		if m.directoryPicker == nil {
+			log.ErrorLog.Printf("directory picker is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.directoryPicker.View(), mainView, true, false)
 	}
 
 	return mainView

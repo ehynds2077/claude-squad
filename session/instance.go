@@ -1,6 +1,7 @@
 package session
 
 import (
+	"claude-squad/config"
 	"claude-squad/log"
 	"claude-squad/session/git"
 	"claude-squad/session/tmux"
@@ -51,6 +52,8 @@ type Instance struct {
 	AutoYes bool
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
+	// RepositoryPath is the absolute path to the repository root this instance belongs to
+	RepositoryPath string
 
 	// DiffStats stores the current git diff statistics
 	diffStats *git.DiffStats
@@ -67,16 +70,22 @@ type Instance struct {
 // ToInstanceData converts an Instance to its serializable form
 func (i *Instance) ToInstanceData() InstanceData {
 	data := InstanceData{
-		Title:     i.Title,
-		Path:      i.Path,
-		Branch:    i.Branch,
-		Status:    i.Status,
-		Height:    i.Height,
-		Width:     i.Width,
-		CreatedAt: i.CreatedAt,
-		UpdatedAt: time.Now(),
-		Program:   i.Program,
-		AutoYes:   i.AutoYes,
+		Title:          i.Title,
+		Path:           i.Path,
+		Branch:         i.Branch,
+		Status:         i.Status,
+		Height:         i.Height,
+		Width:          i.Width,
+		CreatedAt:      i.CreatedAt,
+		UpdatedAt:      time.Now(),
+		Program:        i.Program,
+		AutoYes:        i.AutoYes,
+		RepositoryPath: i.RepositoryPath,
+	}
+	
+	// If RepositoryPath is not set but we have gitWorktree, derive it from RepoPath
+	if i.RepositoryPath == "" && i.gitWorktree != nil {
+		data.RepositoryPath = i.gitWorktree.GetRepoPath()
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -87,6 +96,11 @@ func (i *Instance) ToInstanceData() InstanceData {
 			SessionName:   i.Title,
 			BranchName:    i.gitWorktree.GetBranchName(),
 			BaseCommitSHA: i.gitWorktree.GetBaseCommitSHA(),
+		}
+		
+		// Ensure RepositoryPath is set from gitWorktree if not already set
+		if data.RepositoryPath == "" {
+			data.RepositoryPath = i.gitWorktree.GetRepoPath()
 		}
 	}
 
@@ -105,15 +119,17 @@ func (i *Instance) ToInstanceData() InstanceData {
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
 	instance := &Instance{
-		Title:     data.Title,
-		Path:      data.Path,
-		Branch:    data.Branch,
-		Status:    data.Status,
-		Height:    data.Height,
-		Width:     data.Width,
-		CreatedAt: data.CreatedAt,
-		UpdatedAt: data.UpdatedAt,
-		Program:   data.Program,
+		Title:          data.Title,
+		Path:           data.Path,
+		Branch:         data.Branch,
+		Status:         data.Status,
+		Height:         data.Height,
+		Width:          data.Width,
+		CreatedAt:      data.CreatedAt,
+		UpdatedAt:      data.UpdatedAt,
+		Program:        data.Program,
+		AutoYes:        data.AutoYes,
+		RepositoryPath: data.RepositoryPath,
 		gitWorktree: git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
@@ -161,16 +177,25 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
+	// Find the repository root for this path
+	repoPath, err := config.FindRepositoryForPath(absPath)
+	if err != nil {
+		// If we can't find a repository, we'll set it to empty string
+		// This maintains backward compatibility
+		repoPath = ""
+	}
+
 	return &Instance{
-		Title:     opts.Title,
-		Status:    Ready,
-		Path:      absPath,
-		Program:   opts.Program,
-		Height:    0,
-		Width:     0,
-		CreatedAt: t,
-		UpdatedAt: t,
-		AutoYes:   false,
+		Title:          opts.Title,
+		Status:         Ready,
+		Path:           absPath,
+		Program:        opts.Program,
+		Height:         0,
+		Width:          0,
+		CreatedAt:      t,
+		UpdatedAt:      t,
+		AutoYes:        false,
+		RepositoryPath: repoPath,
 	}, nil
 }
 

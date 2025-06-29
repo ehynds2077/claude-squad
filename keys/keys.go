@@ -25,6 +25,11 @@ const (
 	KeyPrompt // New key for entering a prompt
 	KeyHelp   // Key for showing help screen
 
+	// Directory picker and tab navigation
+	KeyDirectoryPicker // Key for showing directory picker
+	KeyRepoTabNext     // Key for next repository tab (Ctrl+K)
+	KeyRepoTabPrev     // Key for previous repository tab (Ctrl+J)
+
 	// Diff keybindings
 	KeyShiftUp
 	KeyShiftDown
@@ -38,17 +43,20 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"j":          KeyDown,
 	"shift+up":   KeyShiftUp,
 	"shift+down": KeyShiftDown,
-	"N":          KeyPrompt,
 	"enter":      KeyEnter,
 	"o":          KeyEnter,
 	"n":          KeyNew,
+	"N":          KeyDirectoryPicker,
 	"D":          KeyKill,
 	"q":          KeyQuit,
 	"tab":        KeyTab,
 	"c":          KeyCheckout,
 	"r":          KeyResume,
 	"p":          KeySubmit,
+	"P":          KeyPrompt,
 	"?":          KeyHelp,
+	"J":          KeyRepoTabPrev,
+	"K":          KeyRepoTabNext,
 }
 
 // GlobalkeyBindings is a global, immutable map of KeyName tot keybinding.
@@ -94,8 +102,8 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 		key.WithHelp("p", "push branch"),
 	),
 	KeyPrompt: key.NewBinding(
-		key.WithKeys("N"),
-		key.WithHelp("N", "new with prompt"),
+		key.WithKeys("P"),
+		key.WithHelp("P", "new with prompt"),
 	),
 	KeyCheckout: key.NewBinding(
 		key.WithKeys("c"),
@@ -108,6 +116,18 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 	KeyResume: key.NewBinding(
 		key.WithKeys("r"),
 		key.WithHelp("r", "resume"),
+	),
+	KeyDirectoryPicker: key.NewBinding(
+		key.WithKeys("N"),
+		key.WithHelp("N", "pick directory"),
+	),
+	KeyRepoTabPrev: key.NewBinding(
+		key.WithKeys("J"),
+		key.WithHelp("J", "prev repo tab"),
+	),
+	KeyRepoTabNext: key.NewBinding(
+		key.WithKeys("K"),
+		key.WithHelp("K", "next repo tab"),
 	),
 
 	// -- Special keybindings --

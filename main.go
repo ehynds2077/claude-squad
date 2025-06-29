@@ -23,8 +23,9 @@ var (
 	autoYesFlag bool
 	daemonFlag  bool
 	rootCmd     = &cobra.Command{
-		Use:   "claude-squad",
+		Use:   "claude-squad [directory]",
 		Short: "Claude Squad - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			log.Initialize(daemonFlag)
@@ -37,15 +38,24 @@ var (
 				return err
 			}
 
-			// Check if we're in a git repository
-			currentDir, err := filepath.Abs(".")
-			if err != nil {
-				return fmt.Errorf("failed to get current directory: %w", err)
+			// Determine target directory
+			targetDir := ""
+			if len(args) > 0 {
+				// Directory provided as argument
+				absPath, err := filepath.Abs(args[0])
+				if err != nil {
+					return fmt.Errorf("failed to resolve directory path: %w", err)
+				}
+				
+				// Validate that the provided directory is a git repository
+				if !git.IsGitRepo(absPath) {
+					return fmt.Errorf("error: %s is not a git repository", absPath)
+				}
+				
+				targetDir = absPath
 			}
-
-			if !git.IsGitRepo(currentDir) {
-				return fmt.Errorf("error: claude-squad must be run from within a git repository")
-			}
+			// If no argument provided, targetDir remains empty
+			// The app will handle showing existing instances or prompting for directory selection
 
 			cfg := config.LoadConfig()
 
@@ -71,7 +81,7 @@ var (
 				log.ErrorLog.Printf("failed to stop daemon: %v", err)
 			}
 
-			return app.Run(ctx, program, autoYes)
+			return app.Run(ctx, program, autoYes, targetDir)
 		},
 	}
 
